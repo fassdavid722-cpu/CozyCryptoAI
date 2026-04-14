@@ -1,14 +1,13 @@
 """
 CozyCryptoAI - The AI Brain
 Powers all chat, reasoning, and trading personality
-Uses OpenAI GPT-4 as the core intelligence
+Uses Groq (llama-3.3-70b) as the core intelligence — fast and sharp
 """
 
 import asyncio
 import logging
-import json
-from openai import AsyncOpenAI
-from config import OPENAI_API_KEY, AI_NAME
+from groq import AsyncGroq
+from config import GROQ_API_KEY, AI_NAME
 
 logger = logging.getLogger("TradingBrain")
 
@@ -43,7 +42,8 @@ Keep responses concise — max 3-4 sentences unless explaining a complex trade.
 
 class TradingBrain:
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        self.client = AsyncGroq(api_key=GROQ_API_KEY)
+        self.model = "llama-3.3-70b-versatile"
         self.conversation_history = []
         self.trade_notifications = []
         self.notify_callback = None  # Set by telegram bot
@@ -65,7 +65,6 @@ class TradingBrain:
         }
         self.trade_notifications.append(trade_info)
 
-        # Generate a human message about the trade
         message = await self._generate_trade_message(trade_info)
 
         if self.notify_callback:
@@ -81,7 +80,7 @@ class TradingBrain:
             prompt = f"You just closed {trade['symbol']} at ${trade['price']:.4f}. Reason: {trade['reason']}. PnL: {pnl:+.2f} USDT. {emoji} Tell the user about this in your style. Keep it to 2 sentences max."
 
         response = await self.client.chat.completions.create(
-            model="gpt-4o",
+            model=self.model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
@@ -93,7 +92,6 @@ class TradingBrain:
 
     async def chat(self, user_message: str, engine=None) -> str:
         """Main chat interface — processes user message and returns AI response"""
-        # Add context about current trading state
         context = ""
         if engine:
             try:
@@ -102,7 +100,7 @@ class TradingBrain:
             except:
                 pass
 
-        # Handle commands
+        # Handle commands naturally
         lower = user_message.lower()
         if engine:
             if any(word in lower for word in ["pause", "stop trading", "halt"]):
@@ -122,7 +120,7 @@ class TradingBrain:
             self.conversation_history = self.conversation_history[-20:]
 
         response = await self.client.chat.completions.create(
-            model="gpt-4o",
+            model=self.model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 *self.conversation_history
