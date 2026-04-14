@@ -17,8 +17,8 @@ BITGET_BASE_URL = "https://api.bitget.com"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# OpenAI (AI Brain)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Groq (AI Brain)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Trading Config
 TRADING_PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
