@@ -1,6 +1,6 @@
 """
-Bitget API Client
-Handles authentication and all API calls
+Bitget Futures API Client (USDT-M Perpetuals)
+Handles authentication and all futures API calls
 """
 
 import hmac
@@ -22,6 +22,7 @@ class BitgetClient:
         self.passphrase = BITGET_PASSPHRASE
         self.base_url = BITGET_BASE_URL
         self.session = None
+        self.product_type = "USDT-FUTURES"   # USDT-M perpetual contracts
 
     async def _get_session(self):
         if not self.session:
@@ -72,97 +73,168 @@ class BitgetClient:
                 logger.error(f"Bitget API error: {data}")
             return data
 
-    # ── Account ──────────────────────────────────────────────────────────────
+    # ── Account ───────────────────────────────────────────────────────────────
 
     async def get_account_balance(self) -> dict:
-        """Get USDT spot balance"""
-        resp = await self.get("/api/v2/spot/account/assets")
-        assets = resp.get("data", [])
-        for asset in assets:
-            if asset.get("coin") == "USDT":
-                return {
-                    "available": float(asset.get("available", 0)),
-                    "frozen": float(asset.get("frozen", 0)),
-                    "total": float(asset.get("available", 0)) + float(asset.get("frozen", 0))
-                }
-        return {"available": 0, "frozen": 0, "total": 0}
+        """Get USDT futures account balance"""
+        resp = await self.get("/api/v2/mix/account/account", {
+            "symbol": "BTCUSDT",
+            "productType": self.product_type,
+            "marginCoin": "USDT"
+        })
+        data = resp.get("data", {})
+        available = float(data.get("available", 0))
+        frozen = float(data.get("frozen", 0))
+        equity = float(data.get("accountEquity", 0))
+        return {
+            "available": available,
+            "frozen": frozen,
+            "total": equity
+        }
 
-    async def get_all_balances(self) -> list:
-        """Get all asset balances"""
-        resp = await self.get("/api/v2/spot/account/assets")
+    async def get_all_positions(self) -> list:
+        """Get all open futures positions"""
+        resp = await self.get("/api/v2/mix/position/all-position", {
+            "productType": self.product_type,
+            "marginCoin": "USDT"
+        })
         return resp.get("data", [])
 
     async def get_open_orders(self, symbol: str = None) -> list:
-        params = {}
+        params = {"productType": self.product_type}
         if symbol:
             params["symbol"] = symbol
-        resp = await self.get("/api/v2/spot/trade/unfilled-orders", params)
+        resp = await self.get("/api/v2/mix/order/orders-pending", params)
         return resp.get("data", {}).get("entrustedList", [])
 
-    async def get_positions(self) -> list:
-        """Get current open positions"""
-        balances = await self.get_all_balances()
-        positions = []
-        for b in balances:
-            if b.get("coin") != "USDT" and float(b.get("available", 0)) > 0:
-                positions.append(b)
-        return positions
+    # ── Leverage ──────────────────────────────────────────────────────────────
 
-    # ── Market Data ──────────────────────────────────────────────────────────
+    async def set_leverage(self, symbol: str, leverage: int, hold_side: str = "long") -> dict:
+        """Set leverage for a symbol"""
+        return await self.post("/api/v2/mix/account/set-leverage", {
+            "symbol": symbol,
+            "productType": self.product_type,
+            "marginCoin": "USDT",
+            "leverage": str(leverage),
+            "holdSide": hold_side
+        })
+
+    async def set_margin_mode(self, symbol: str, mode: str = "crossed") -> dict:
+        """Set margin mode: 'crossed' (cross) or 'fixed' (isolated)"""
+        return await self.post("/api/v2/mix/account/set-margin-mode", {
+            "symbol": symbol,
+            "productType": self.product_type,
+            "marginCoin": "USDT",
+            "marginMode": mode
+        })
+
+    # ── Market Data ───────────────────────────────────────────────────────────
 
     async def get_ticker(self, symbol: str) -> dict:
-        resp = await self.get("/api/v2/spot/market/tickers", {"symbol": symbol})
+        resp = await self.get("/api/v2/mix/market/ticker", {
+            "symbol": symbol,
+            "productType": self.product_type
+        })
         data = resp.get("data", [])
-        return data[0] if data else {}
+        return data[0] if isinstance(data, list) and data else data if isinstance(data, dict) else {}
 
     async def get_candles(self, symbol: str, granularity: str = "1m", limit: int = 100) -> list:
-        """Get OHLCV candles"""
-        resp = await self.get("/api/v2/spot/market/candles", {
+        """Get OHLCV candles for futures"""
+        resp = await self.get("/api/v2/mix/market/candles", {
             "symbol": symbol,
+            "productType": self.product_type,
             "granularity": granularity,
             "limit": str(limit)
         })
         return resp.get("data", [])
 
     async def get_orderbook(self, symbol: str, limit: int = 20) -> dict:
-        resp = await self.get("/api/v2/spot/market/orderbook", {
+        resp = await self.get("/api/v2/mix/market/merge-depth", {
             "symbol": symbol,
+            "productType": self.product_type,
             "limit": str(limit)
         })
         return resp.get("data", {})
 
-    # ── Trading ──────────────────────────────────────────────────────────────
+    # ── Trading ───────────────────────────────────────────────────────────────
 
-    async def place_order(self, symbol: str, side: str, order_type: str,
-                          size: str, price: str = None) -> dict:
+    async def place_order(self, symbol: str, side: str, trade_side: str,
+                          order_type: str, size: str, price: str = None,
+                          reduce_only: bool = False) -> dict:
         """
-        Place a spot order
+        Place a futures order
         side: 'buy' | 'sell'
+        trade_side: 'open' | 'close'
         order_type: 'limit' | 'market'
+        size: number of contracts
         """
         body = {
             "symbol": symbol,
-            "side": side,
-            "orderType": order_type,
+            "productType": self.product_type,
+            "marginMode": "crossed",
+            "marginCoin": "USDT",
             "size": size,
+            "side": side,
+            "tradeSide": trade_side,
+            "orderType": order_type,
             "force": "gtc"
         }
         if price and order_type == "limit":
             body["price"] = price
+        if reduce_only:
+            body["reduceOnly"] = "YES"
 
-        logger.info(f"Placing order: {body}")
-        return await self.post("/api/v2/spot/trade/place-order", body)
+        logger.info(f"Placing futures order: {body}")
+        return await self.post("/api/v2/mix/order/place-order", body)
+
+    async def place_stop_loss(self, symbol: str, hold_side: str,
+                               trigger_price: str, size: str) -> dict:
+        """Place a stop loss order"""
+        return await self.post("/api/v2/mix/order/place-tpsl-order", {
+            "symbol": symbol,
+            "productType": self.product_type,
+            "marginCoin": "USDT",
+            "planType": "loss_plan",
+            "triggerPrice": trigger_price,
+            "triggerType": "mark_price",
+            "executePrice": "0",
+            "holdSide": hold_side,
+            "size": size
+        })
+
+    async def place_take_profit(self, symbol: str, hold_side: str,
+                                 trigger_price: str, size: str) -> dict:
+        """Place a take profit order"""
+        return await self.post("/api/v2/mix/order/place-tpsl-order", {
+            "symbol": symbol,
+            "productType": self.product_type,
+            "marginCoin": "USDT",
+            "planType": "profit_plan",
+            "triggerPrice": trigger_price,
+            "triggerType": "mark_price",
+            "executePrice": "0",
+            "holdSide": hold_side,
+            "size": size
+        })
 
     async def cancel_order(self, symbol: str, order_id: str) -> dict:
-        return await self.post("/api/v2/spot/trade/cancel-order", {
+        return await self.post("/api/v2/mix/order/cancel-order", {
             "symbol": symbol,
+            "productType": self.product_type,
             "orderId": order_id
         })
 
-    async def cancel_all_orders(self, symbol: str) -> dict:
-        return await self.post("/api/v2/spot/trade/cancel-symbol-order", {
-            "symbol": symbol
-        })
+    async def close_position(self, symbol: str, hold_side: str, size: str) -> dict:
+        """Close a futures position"""
+        side = "sell" if hold_side == "long" else "buy"
+        return await self.place_order(
+            symbol=symbol,
+            side=side,
+            trade_side="close",
+            order_type="market",
+            size=size,
+            reduce_only=True
+        )
 
     async def close(self):
         if self.session:
