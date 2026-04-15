@@ -1,20 +1,22 @@
 """
-CozyCryptoAI — Institutional Strategy Engine
-Analyzes markets the way smart money does:
+CozyCryptoAI — Pure Institutional Strategy
+NO indicators. NO EMA. NO RSI. NO MACD.
 
-1. Liquidity         — Where are the stop hunts? Where is liquidity resting?
-2. Order Flow        — Are buyers or sellers in control? CVD, delta analysis
-3. Footprint Chart   — Buy vs sell volume at each price level
-4. Market Structure  — BOS (Break of Structure), CHoCH (Change of Character), HH/HL/LH/LL
-5. Accumulation/Dist — Wyckoff phases, absorption, re-accumulation
-6. Execution Zones   — OB (Order Blocks), FVG (Fair Value Gaps), premium/discount
-7. Volatility Regime — ATR regime, expansion vs contraction, avoid choppy markets
-8. Order Book        — Bid/ask imbalance, large wall detection, spoofing filter
+Trades exactly how institutions do:
+- Read WHERE liquidity is resting
+- Identify WHEN smart money is accumulating or distributing
+- Wait for market structure to SHIFT
+- Execute only from high-probability zones (OB, FVG, discount/premium)
+- Confirm with order flow and footprint before pulling the trigger
+- Order book tells you what's about to happen BEFORE price moves
+
+This is SMC (Smart Money Concepts) + ICT methodology + Wyckoff + Order Flow
+combined into one engine.
 """
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Tuple, Dict
 from config import STOP_LOSS_PERCENT, TAKE_PROFIT_PERCENT
 
 logger = logging.getLogger("InstitutionalStrategy")
@@ -23,8 +25,8 @@ logger = logging.getLogger("InstitutionalStrategy")
 @dataclass
 class Signal:
     symbol: str
-    action: str             # 'BUY' | 'SELL' | 'HOLD'
-    confidence: float       # 0.0 - 1.0
+    action: str              # 'BUY' | 'SELL'
+    confidence: float        # 0.0 - 1.0
     entry_price: float
     stop_loss: float
     take_profit: float
@@ -32,211 +34,320 @@ class Signal:
     size_percent: float
     confluence: List[str] = field(default_factory=list)
     regime: str = "unknown"
+    invalidation: float = 0.0   # Price level that kills the trade idea
 
 
 class InstitutionalStrategy:
+
     def __init__(self):
         self.sl_pct = STOP_LOSS_PERCENT / 100
         self.tp_pct = TAKE_PROFIT_PERCENT / 100
+        self.MIN_CONFLUENCE = 5   # Minimum points to take a trade
 
     def analyze(self, symbol: str, candles: list,
-                orderbook: dict = None, direction_bias: str = None) -> Optional[Signal]:
+                orderbook: dict = None,
+                direction_bias: str = None) -> Optional[Signal]:
         """
-        Full institutional analysis pipeline
-        Returns a Signal if conditions align, else None
+        Pure institutional analysis. No indicators.
+        Every decision is based on price, volume, structure, and order flow.
         """
         try:
-            if not candles or len(candles) < 50:
+            if not candles or len(candles) < 60:
                 return None
 
-            closes  = [float(c[4]) for c in candles]
             opens   = [float(c[1]) for c in candles]
             highs   = [float(c[2]) for c in candles]
             lows    = [float(c[3]) for c in candles]
+            closes  = [float(c[4]) for c in candles]
             volumes = [float(c[5]) for c in candles]
             price   = closes[-1]
 
             if price <= 0:
                 return None
 
-            confluence = []
             long_score  = 0
             short_score = 0
+            confluence  = []
 
-            # ── 1. VOLATILITY REGIME ─────────────────────────────────────────
-            regime, atr = self._volatility_regime(closes, highs, lows)
-            if regime == "choppy":
-                return None   # Never trade choppy markets
+            # ── LAYER 1: VOLATILITY REGIME ───────────────────────────────────
+            # Never trade when price is compressing — no edge
+            regime, atr = self._volatility_regime(highs, lows, closes)
+            if regime == "dead":
+                return None   # No range, no trade
             if regime == "expanding":
                 long_score  += 1
                 short_score += 1
-                confluence.append(f"Volatility expanding (ATR {atr:.4f})")
+                confluence.append(f"Volatility expanding — ATR {atr/price*100:.2f}% of price")
+            elif regime == "compressed":
+                # Compression before expansion — wait for the break
+                # Still analyze but reduce conviction
+                pass
 
-            # ── 2. MARKET STRUCTURE ──────────────────────────────────────────
+            # ── LAYER 2: MARKET STRUCTURE ─────────────────────────────────────
+            # Structure tells us the STORY of who is in control
             structure = self._market_structure(highs, lows, closes)
+
             if structure["trend"] == "bullish":
                 long_score += 3
-                confluence.append(f"Bullish structure ({structure['pattern']})")
+                confluence.append(f"Bullish structure — {structure['detail']}")
             elif structure["trend"] == "bearish":
                 short_score += 3
-                confluence.append(f"Bearish structure ({structure['pattern']})")
-            if structure["choch_long"]:
-                long_score += 2
-                confluence.append("CHoCH — potential bullish reversal")
-            if structure["choch_short"]:
-                short_score += 2
-                confluence.append("CHoCH — potential bearish reversal")
-            if structure["bos_long"]:
-                long_score += 2
-                confluence.append("BOS — bullish continuation")
-            if structure["bos_short"]:
-                short_score += 2
-                confluence.append("BOS — bearish continuation")
+                confluence.append(f"Bearish structure — {structure['detail']}")
 
-            # ── 3. LIQUIDITY ANALYSIS ────────────────────────────────────────
+            # Break of Structure = trend continuation
+            if structure["bos_bullish"]:
+                long_score += 3
+                confluence.append("BOS confirmed bullish — structure broke to upside")
+            if structure["bos_bearish"]:
+                short_score += 3
+                confluence.append("BOS confirmed bearish — structure broke to downside")
+
+            # Change of Character = potential reversal — high value signal
+            if structure["choch_bullish"]:
+                long_score += 4
+                confluence.append("CHoCH bullish — smart money shifted, potential reversal long")
+            if structure["choch_bearish"]:
+                short_score += 4
+                confluence.append("CHoCH bearish — smart money shifted, potential reversal short")
+
+            # ── LAYER 3: LIQUIDITY ────────────────────────────────────────────
+            # Smart money ALWAYS moves toward liquidity before reversing
             liquidity = self._liquidity_analysis(highs, lows, closes, volumes)
-            if liquidity["swept_highs"]:
-                short_score += 2
-                confluence.append("Liquidity sweep above highs — distribution")
-            if liquidity["swept_lows"]:
-                long_score += 2
-                confluence.append("Liquidity sweep below lows — accumulation")
+
+            if liquidity["sell_side_swept"]:
+                # Lows swept = stop hunt below = now go long
+                long_score += 4
+                confluence.append(f"Sell-side liquidity swept below ${liquidity['swept_level']:.6g} — reversal setup")
+            if liquidity["buy_side_swept"]:
+                # Highs swept = stop hunt above = now go short
+                short_score += 4
+                confluence.append(f"Buy-side liquidity swept above ${liquidity['swept_level']:.6g} — reversal setup")
             if liquidity["equal_highs"]:
-                confluence.append(f"Equal highs resting at ${liquidity['equal_highs']:.4f} — target")
-            if liquidity["equal_lows"]:
-                confluence.append(f"Equal lows resting at ${liquidity['equal_lows']:.4f} — target")
-
-            # ── 4. ORDER FLOW (CVD) ──────────────────────────────────────────
-            order_flow = self._order_flow(opens, closes, volumes)
-            if order_flow["cvd_trend"] == "bullish" and order_flow["delta"] > 0:
-                long_score += 2
-                confluence.append(f"Bullish CVD (delta +{order_flow['delta']:.0f})")
-            elif order_flow["cvd_trend"] == "bearish" and order_flow["delta"] < 0:
-                short_score += 2
-                confluence.append(f"Bearish CVD (delta {order_flow['delta']:.0f})")
-            if order_flow["absorption"]:
-                confluence.append(f"Volume absorption detected — {order_flow['absorption']}")
-
-            # ── 5. FOOTPRINT / DELTA ─────────────────────────────────────────
-            footprint = self._footprint_analysis(opens, closes, volumes, highs, lows)
-            if footprint["buying_pressure"] > 0.65:
-                long_score += 2
-                confluence.append(f"Footprint: {footprint['buying_pressure']:.0%} buying pressure")
-            elif footprint["buying_pressure"] < 0.35:
-                short_score += 2
-                confluence.append(f"Footprint: {1 - footprint['buying_pressure']:.0%} selling pressure")
-            if footprint["imbalance_long"]:
-                long_score += 1
-                confluence.append("Footprint bid imbalance stack")
-            if footprint["imbalance_short"]:
                 short_score += 1
-                confluence.append("Footprint ask imbalance stack")
-
-            # ── 6. ACCUMULATION / DISTRIBUTION ──────────────────────────────
-            acc_dist = self._accumulation_distribution(opens, closes, highs, lows, volumes)
-            if acc_dist["phase"] == "accumulation":
+                confluence.append(f"Equal highs at ${liquidity['equal_highs']:.6g} — buy-side liquidity target")
+            if liquidity["equal_lows"]:
+                long_score += 1
+                confluence.append(f"Equal lows at ${liquidity['equal_lows']:.6g} — sell-side liquidity target")
+            if liquidity["inducement_long"]:
                 long_score += 2
-                confluence.append(f"Wyckoff accumulation (MFI {acc_dist['mfi']:.0f})")
+                confluence.append("Inducement sweep below structure — engineered liquidity grab")
+            if liquidity["inducement_short"]:
+                short_score += 2
+                confluence.append("Inducement sweep above structure — engineered liquidity grab")
+
+            # ── LAYER 4: ORDER FLOW (CVD) ─────────────────────────────────────
+            # CVD shows us if REAL buyers/sellers are stepping in
+            # This is the fastest signal — tells you before price confirms
+            order_flow = self._order_flow(opens, closes, volumes)
+
+            if order_flow["aggressive_buying"]:
+                long_score += 3
+                confluence.append(f"Aggressive buying — CVD delta +{order_flow['delta']:,.0f}, buyers in control")
+            if order_flow["aggressive_selling"]:
+                short_score += 3
+                confluence.append(f"Aggressive selling — CVD delta {order_flow['delta']:,.0f}, sellers in control")
+            if order_flow["absorption_long"]:
+                long_score += 3
+                confluence.append("Selling absorbed by buyers — high volume, price held — long signal")
+            if order_flow["absorption_short"]:
+                short_score += 3
+                confluence.append("Buying absorbed by sellers — high volume, price rejected — short signal")
+            if order_flow["cvd_divergence_long"]:
+                long_score += 2
+                confluence.append("CVD divergence — price making lows but delta rising — hidden buying")
+            if order_flow["cvd_divergence_short"]:
+                short_score += 2
+                confluence.append("CVD divergence — price making highs but delta falling — hidden selling")
+
+            # ── LAYER 5: FOOTPRINT CHART ──────────────────────────────────────
+            # Footprint shows buy vs sell at every price level
+            # Stacked bid imbalances = institutions buying at that level
+            footprint = self._footprint(opens, closes, highs, lows, volumes)
+
+            if footprint["stacked_bid_imbalance"]:
+                long_score += 3
+                confluence.append("Footprint: stacked bid imbalances — institutions absorbing supply")
+            if footprint["stacked_ask_imbalance"]:
+                short_score += 3
+                confluence.append("Footprint: stacked ask imbalances — institutions distributing")
+            if footprint["unfinished_business_low"]:
+                long_score += 2
+                confluence.append("Footprint: unfinished business below — price likely returns to fill")
+            if footprint["unfinished_business_high"]:
+                short_score += 2
+                confluence.append("Footprint: unfinished business above — price likely returns to fill")
+            if footprint["buying_exhaustion"]:
+                short_score += 2
+                confluence.append("Footprint: buying exhaustion — delta positive but price stalling")
+            if footprint["selling_exhaustion"]:
+                long_score += 2
+                confluence.append("Footprint: selling exhaustion — delta negative but price holding")
+
+            # ── LAYER 6: ACCUMULATION / DISTRIBUTION ──────────────────────────
+            # Wyckoff: institutions accumulate in silence, distribute at the top
+            acc_dist = self._accumulation_distribution(opens, closes, highs, lows, volumes)
+
+            if acc_dist["phase"] == "spring":
+                long_score += 5
+                confluence.append("Wyckoff Spring — final shakeout below range, major long setup")
+            elif acc_dist["phase"] == "upthrust":
+                short_score += 5
+                confluence.append("Wyckoff Upthrust — false breakout above range, major short setup")
+            elif acc_dist["phase"] == "accumulation":
+                long_score += 2
+                confluence.append(f"Wyckoff accumulation phase — smart money building longs")
             elif acc_dist["phase"] == "distribution":
                 short_score += 2
-                confluence.append(f"Wyckoff distribution (MFI {acc_dist['mfi']:.0f})")
+                confluence.append(f"Wyckoff distribution phase — smart money offloading longs")
             elif acc_dist["phase"] == "markup":
-                long_score += 1
-                confluence.append("Wyckoff markup phase")
-            elif acc_dist["phase"] == "markdown":
-                short_score += 1
-                confluence.append("Wyckoff markdown phase")
-
-            # ── 7. EXECUTION ZONES (OB + FVG) ───────────────────────────────
-            zones = self._execution_zones(opens, closes, highs, lows)
-            in_bullish_ob  = any(z["low"] <= price <= z["high"] for z in zones["bullish_ob"])
-            in_bearish_ob  = any(z["low"] <= price <= z["high"] for z in zones["bearish_ob"])
-            in_bullish_fvg = any(z["low"] <= price <= z["high"] for z in zones["bullish_fvg"])
-            in_bearish_fvg = any(z["low"] <= price <= z["high"] for z in zones["bearish_fvg"])
-
-            if in_bullish_ob:
-                long_score += 3
-                confluence.append("Price in bullish Order Block")
-            if in_bearish_ob:
-                short_score += 3
-                confluence.append("Price in bearish Order Block")
-            if in_bullish_fvg:
                 long_score += 2
-                confluence.append("Price filling bullish FVG")
-            if in_bearish_fvg:
+                confluence.append("Wyckoff markup — institutions driving price up")
+            elif acc_dist["phase"] == "markdown":
                 short_score += 2
-                confluence.append("Price filling bearish FVG")
+                confluence.append("Wyckoff markdown — institutions driving price down")
+            if acc_dist["re_accumulation"]:
+                long_score += 2
+                confluence.append("Re-accumulation range — continuation long after pullback")
+            if acc_dist["re_distribution"]:
+                short_score += 2
+                confluence.append("Re-distribution range — continuation short after bounce")
 
-            # Premium/discount check
+            # ── LAYER 7: EXECUTION ZONES (OB + FVG) ──────────────────────────
+            # Only enter from institutional zones — not random price levels
+            zones = self._execution_zones(opens, closes, highs, lows)
+
+            # Order Blocks
+            for ob in zones["bullish_ob"]:
+                if ob["low"] <= price <= ob["high"]:
+                    long_score += 4
+                    confluence.append(f"Price in bullish Order Block ${ob['low']:.6g}–${ob['high']:.6g} — institutional demand zone")
+                    break
+
+            for ob in zones["bearish_ob"]:
+                if ob["low"] <= price <= ob["high"]:
+                    short_score += 4
+                    confluence.append(f"Price in bearish Order Block ${ob['low']:.6g}–${ob['high']:.6g} — institutional supply zone")
+                    break
+
+            # Breaker Blocks (failed OBs that flip — very high probability)
+            for bb in zones["bullish_breaker"]:
+                if bb["low"] <= price <= bb["high"]:
+                    long_score += 5
+                    confluence.append(f"Price in bullish Breaker Block — failed bearish OB now support")
+                    break
+
+            for bb in zones["bearish_breaker"]:
+                if bb["low"] <= price <= bb["high"]:
+                    short_score += 5
+                    confluence.append(f"Price in bearish Breaker Block — failed bullish OB now resistance")
+                    break
+
+            # Fair Value Gaps
+            for fvg in zones["bullish_fvg"]:
+                if fvg["low"] <= price <= fvg["high"]:
+                    long_score += 3
+                    confluence.append(f"Price filling bullish FVG ${fvg['low']:.6g}–${fvg['high']:.6g} — inefficiency fill")
+                    break
+
+            for fvg in zones["bearish_fvg"]:
+                if fvg["low"] <= price <= fvg["high"]:
+                    short_score += 3
+                    confluence.append(f"Price filling bearish FVG ${fvg['low']:.6g}–${fvg['high']:.6g} — inefficiency fill")
+                    break
+
+            # Mitigation Blocks (price returning to mitigate unmitigated OBs)
+            for mb in zones["mitigation_blocks"]:
+                if mb["low"] <= price <= mb["high"]:
+                    if mb["type"] == "long":
+                        long_score += 3
+                        confluence.append("Price at mitigation block — institutions defending previous lows")
+                    else:
+                        short_score += 3
+                        confluence.append("Price at mitigation block — institutions defending previous highs")
+                    break
+
+            # ICT Premium / Discount
             pd = self._premium_discount(highs, lows, price)
             if pd["zone"] == "discount":
-                long_score += 1
-                confluence.append(f"Price in discount zone ({pd['percent']:.0f}% of range)")
+                long_score += 2
+                confluence.append(f"ICT discount zone ({pd['pct']:.0f}% of range) — optimal long territory")
             elif pd["zone"] == "premium":
-                short_score += 1
-                confluence.append(f"Price in premium zone ({pd['percent']:.0f}% of range)")
+                short_score += 2
+                confluence.append(f"ICT premium zone ({pd['pct']:.0f}% of range) — optimal short territory")
 
-            # ── 8. ORDER BOOK ANALYSIS ───────────────────────────────────────
+            # ── LAYER 8: ORDER BOOK ───────────────────────────────────────────
+            # Order book gives real-time intent — what big players are doing NOW
             if orderbook and orderbook.get("bids") and orderbook.get("asks"):
-                ob_analysis = self._orderbook_analysis(orderbook, price)
-                if ob_analysis["imbalance"] == "bid_heavy":
+                ob_analysis = self._orderbook_analysis(orderbook, price, atr)
+
+                if ob_analysis["bid_dominance"]:
+                    long_score += 3
+                    confluence.append(f"Order book bid dominance {ob_analysis['ratio']:.1f}x — buyers stacking up")
+                elif ob_analysis["ask_dominance"]:
+                    short_score += 3
+                    confluence.append(f"Order book ask dominance {ob_analysis['ratio']:.1f}x — sellers stacking up")
+                if ob_analysis["iceberg_bid"]:
                     long_score += 2
-                    confluence.append(f"Order book bid-heavy ({ob_analysis['ratio']:.1f}x)")
-                elif ob_analysis["imbalance"] == "ask_heavy":
+                    confluence.append(f"Iceberg bid detected at ${ob_analysis['iceberg_bid_price']:.6g} — hidden buy order")
+                if ob_analysis["iceberg_ask"]:
                     short_score += 2
-                    confluence.append(f"Order book ask-heavy ({ob_analysis['ratio']:.1f}x)")
-                if ob_analysis["large_bid_wall"]:
-                    confluence.append(f"Large bid wall at ${ob_analysis['large_bid_wall']:.4f}")
-                if ob_analysis["large_ask_wall"]:
-                    confluence.append(f"Large ask wall at ${ob_analysis['large_ask_wall']:.4f}")
+                    confluence.append(f"Iceberg ask detected at ${ob_analysis['iceberg_ask_price']:.6g} — hidden sell order")
+                if ob_analysis["thin_ask_wall"]:
+                    long_score += 1
+                    confluence.append("Thin ask wall above — price can break through easily")
+                if ob_analysis["thin_bid_wall"]:
+                    short_score += 1
+                    confluence.append("Thin bid wall below — price can break through easily")
 
-            # Direction bias from scanner
-            if direction_bias == "long":
-                long_score += 1
-            elif direction_bias == "short":
-                short_score += 1
-
-            # ── SIGNAL DECISION ──────────────────────────────────────────────
-            max_score = 18
+            # ── DECISION ──────────────────────────────────────────────────────
+            max_score = 25
             action = None
-            score = 0
+            score  = 0
 
-            if long_score >= 6 and long_score > short_score:
+            if long_score >= self.MIN_CONFLUENCE and long_score > short_score:
                 action = "BUY"
-                score = long_score
-            elif short_score >= 6 and short_score > long_score:
+                score  = long_score
+            elif short_score >= self.MIN_CONFLUENCE and short_score > long_score:
                 action = "SELL"
-                score = short_score
+                score  = short_score
 
             if not action:
                 return None
 
             confidence = min(score / max_score, 1.0)
-            if confidence < 0.45:
+            if confidence < 0.40:
                 return None
 
-            # Dynamic SL using ATR — tighter in low vol, wider in expanding
-            atr_multiplier = 1.5 if regime == "expanding" else 1.0
-            sl_distance = max(atr * atr_multiplier, price * self.sl_pct)
-            tp_distance = sl_distance * 2.0   # Always maintain 2:1 R/R minimum
-
+            # ── STOP LOSS PLACEMENT ───────────────────────────────────────────
+            # Place SL beyond the nearest liquidity / structure level
+            # NOT a fixed % — institutions use structure for stops
+            sl_buffer = atr * 0.5
             if action == "BUY":
-                stop_loss   = price - sl_distance
-                take_profit = price + tp_distance
+                # SL below the most recent swing low or swept level
+                ref_low   = min(lows[-10:])
+                stop_loss = ref_low - sl_buffer
+                # Hard cap: no wider than config SL%
+                stop_loss = max(stop_loss, price * (1 - self.sl_pct * 1.5))
+                take_profit = price + (price - stop_loss) * 2.5   # 2.5:1 R/R
+                invalidation = stop_loss
             else:
-                stop_loss   = price + sl_distance
-                take_profit = price - tp_distance
+                ref_high    = max(highs[-10:])
+                stop_loss   = ref_high + sl_buffer
+                stop_loss   = min(stop_loss, price * (1 + self.sl_pct * 1.5))
+                take_profit = price - (stop_loss - price) * 2.5
+                invalidation = stop_loss
 
-            # Size: 5-12% based on confidence
+            # Dynamic sizing: more confident = larger size (5–12%)
             size_percent = 5 + (confidence * 7)
 
-            top_reasons = confluence[:4]
-            reason = " | ".join(top_reasons)
+            reason = " | ".join(confluence[:4])
 
             logger.info(
                 f"🎯 {action} {symbol} @ {price:.6g} | "
-                f"Confidence: {confidence:.0%} | Regime: {regime} | {reason}"
+                f"Conf: {confidence:.0%} | Regime: {regime} | Score: {score}/{max_score}"
             )
+            for c in confluence[:6]:
+                logger.info(f"   ✓ {c}")
 
             return Signal(
                 symbol=symbol,
@@ -248,453 +359,651 @@ class InstitutionalStrategy:
                 reason=reason,
                 size_percent=size_percent,
                 confluence=confluence,
-                regime=regime
+                regime=regime,
+                invalidation=invalidation
             )
 
         except Exception as e:
-            logger.error(f"Strategy error for {symbol}: {e}")
+            logger.error(f"Strategy error {symbol}: {e}")
             return None
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # ANALYSIS MODULES
-    # ═════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER 1 — VOLATILITY REGIME
+    # ═══════════════════════════════════════════════════════════════════════════
 
-    def _volatility_regime(self, closes: list, highs: list, lows: list,
-                            period: int = 14) -> Tuple[str, float]:
+    def _volatility_regime(self, highs, lows, closes, period=14) -> Tuple[str, float]:
         """
-        ATR-based volatility regime detection
-        Returns: ('trending'|'expanding'|'choppy', atr_value)
+        ATR-based regime — no indicators, just true range
+        dead       → price going nowhere, don't trade
+        compressed → coiling, breakout coming
+        trending   → directional, good for continuation
+        expanding  → momentum move, scalp aggressively
         """
         if len(closes) < period + 2:
-            return "trending", 0.0
+            return "trending", 0.001
 
         trs = []
         for i in range(1, len(closes)):
             tr = max(
                 highs[i] - lows[i],
-                abs(highs[i] - closes[i - 1]),
-                abs(lows[i] - closes[i - 1])
+                abs(highs[i] - closes[i-1]),
+                abs(lows[i]  - closes[i-1])
             )
             trs.append(tr)
 
-        atr = sum(trs[-period:]) / period
-        prev_atr = sum(trs[-period * 2:-period]) / period if len(trs) >= period * 2 else atr
+        atr      = sum(trs[-period:]) / period
+        prev_atr = sum(trs[-period*2:-period]) / period if len(trs) >= period*2 else atr
+        price    = closes[-1]
+        atr_pct  = (atr / price) * 100
 
-        price = closes[-1]
-        atr_pct = (atr / price) * 100
-
-        # ATR expanding fast = good for scalping
-        if atr > prev_atr * 1.2:
+        if atr_pct < 0.15:
+            return "dead", atr
+        elif atr > prev_atr * 1.3:
             return "expanding", atr
-        # ATR very low relative to price = choppy / no range
-        elif atr_pct < 0.3:
-            return "choppy", atr
+        elif atr < prev_atr * 0.7:
+            return "compressed", atr
         else:
             return "trending", atr
 
-    def _market_structure(self, highs: list, lows: list, closes: list,
-                           lookback: int = 20) -> dict:
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER 2 — MARKET STRUCTURE
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _market_structure(self, highs, lows, closes, swing_window=5) -> dict:
         """
-        Detect: trend, BOS (Break of Structure), CHoCH (Change of Character)
+        Pure price action structure:
+        - Swing highs / swing lows
+        - HH/HL = bullish, LH/LL = bearish
+        - BOS = break of structure (continuation)
+        - CHoCH = change of character (reversal) — the most powerful signal
         """
         result = {
-            "trend": "neutral",
-            "pattern": "",
-            "bos_long": False,
-            "bos_short": False,
-            "choch_long": False,
-            "choch_short": False
+            "trend": "neutral", "detail": "",
+            "bos_bullish": False, "bos_bearish": False,
+            "choch_bullish": False, "choch_bearish": False,
+            "last_sh": None, "last_sl": None
         }
 
-        if len(highs) < lookback * 2:
+        if len(highs) < swing_window * 4:
             return result
 
-        # Find swing highs/lows
-        swing_highs = self._swing_highs(highs, lookback // 2)
-        swing_lows  = self._swing_lows(lows, lookback // 2)
+        sh = self._find_swing_highs(highs, swing_window)
+        sl = self._find_swing_lows(lows, swing_window)
 
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
+        if len(sh) < 2 or len(sl) < 2:
             return result
 
-        # Trend via HH/HL or LH/LL
-        hh = swing_highs[-1] > swing_highs[-2]
-        hl = swing_lows[-1] > swing_lows[-2]
-        lh = swing_highs[-1] < swing_highs[-2]
-        ll = swing_lows[-1] < swing_lows[-2]
+        result["last_sh"] = sh[-1]
+        result["last_sl"] = sl[-1]
+
+        hh = sh[-1] > sh[-2]
+        hl = sl[-1] > sl[-2]
+        lh = sh[-1] < sh[-2]
+        ll = sl[-1] < sl[-2]
 
         if hh and hl:
-            result["trend"] = "bullish"
-            result["pattern"] = "HH/HL"
+            result["trend"]  = "bullish"
+            result["detail"] = "HH + HL confirmed"
         elif lh and ll:
-            result["trend"] = "bearish"
-            result["pattern"] = "LH/LL"
+            result["trend"]  = "bearish"
+            result["detail"] = "LH + LL confirmed"
+        elif hh and ll:
+            result["trend"]  = "neutral"
+            result["detail"] = "conflicting — HH but LL"
+        elif lh and hl:
+            result["trend"]  = "neutral"
+            result["detail"] = "conflicting — HL but LH"
 
-        # BOS: close breaks last swing high/low
-        last_sh = swing_highs[-1]
-        last_sl = swing_lows[-1]
         price = closes[-1]
 
-        if result["trend"] == "bullish" and price > last_sh:
-            result["bos_long"] = True
-        elif result["trend"] == "bearish" and price < last_sl:
-            result["bos_short"] = True
+        # BOS: price closes BEYOND the last swing in trend direction
+        if result["trend"] == "bullish" and price > sh[-1]:
+            result["bos_bullish"] = True
+        elif result["trend"] == "bearish" and price < sl[-1]:
+            result["bos_bearish"] = True
 
-        # CHoCH: trend was bearish but now breaks above last SH (or vice versa)
-        if result["trend"] == "bearish" and price > last_sh:
-            result["choch_long"] = True
-        elif result["trend"] == "bullish" and price < last_sl:
-            result["choch_short"] = True
+        # CHoCH: price breaks AGAINST trend — most powerful reversal signal
+        if result["trend"] == "bearish" and price > sh[-1]:
+            result["choch_bullish"] = True
+        elif result["trend"] == "bullish" and price < sl[-1]:
+            result["choch_bearish"] = True
 
         return result
 
-    def _liquidity_analysis(self, highs: list, lows: list, closes: list,
-                             volumes: list, lookback: int = 20) -> dict:
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER 3 — LIQUIDITY
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _liquidity_analysis(self, highs, lows, closes, volumes, lookback=30) -> dict:
         """
-        Detect liquidity pools, sweeps, equal highs/lows
-        Smart money hunts liquidity before reversing
+        Smart money moves toward liquidity (resting stop orders) before reversing.
+
+        Sell-side liquidity = stops below recent lows (retail longs got stopped out)
+        Buy-side liquidity  = stops above recent highs (retail shorts got stopped out)
+
+        After a sweep: institutions reverse. This is the entry.
         """
         result = {
-            "swept_highs": False,
-            "swept_lows": False,
+            "sell_side_swept": False,
+            "buy_side_swept":  False,
+            "swept_level": 0,
             "equal_highs": None,
-            "equal_lows": None
+            "equal_lows":  None,
+            "inducement_long": False,
+            "inducement_short": False
         }
 
-        if len(highs) < lookback + 5:
+        if len(closes) < lookback + 5:
             return result
 
-        price = closes[-1]
-        prev_highs = highs[-lookback - 1:-1]
-        prev_lows  = lows[-lookback - 1:-1]
+        price      = closes[-1]
+        prev_highs = highs[-lookback-1:-3]
+        prev_lows  = lows[-lookback-1:-3]
+        recent_h   = highs[-3:]
+        recent_l   = lows[-3:]
 
-        # Sweep: price exceeded prior high/low but closed back below/above
-        prev_high = max(prev_highs)
-        prev_low  = min(prev_lows)
+        ref_high = max(prev_highs) if prev_highs else 0
+        ref_low  = min(prev_lows)  if prev_lows  else float('inf')
 
-        if highs[-1] > prev_high and closes[-1] < prev_high:
-            result["swept_highs"] = True
-        if lows[-1] < prev_low and closes[-1] > prev_low:
-            result["swept_lows"] = True
+        # Sweep: wick went through level but CLOSED back inside
+        # Sell-side sweep: wick below prior lows, close above them
+        if min(recent_l) < ref_low and closes[-1] > ref_low:
+            result["sell_side_swept"] = True
+            result["swept_level"]     = ref_low
 
-        # Equal highs/lows (within 0.15%) — untapped liquidity
-        tolerance = prev_high * 0.0015
-        equal_h = [h for h in prev_highs if abs(h - prev_high) < tolerance]
-        if len(equal_h) >= 2:
-            result["equal_highs"] = prev_high
+        # Buy-side sweep: wick above prior highs, close below them
+        if max(recent_h) > ref_high and closes[-1] < ref_high:
+            result["buy_side_swept"] = True
+            result["swept_level"]    = ref_high
 
-        tolerance_l = prev_low * 0.0015
-        equal_l = [l for l in prev_lows if abs(l - prev_low) < tolerance_l]
-        if len(equal_l) >= 2:
-            result["equal_lows"] = prev_low
+        # Equal highs/lows: 2+ touches within 0.1% = resting liquidity pool
+        tol_h = ref_high * 0.001
+        tol_l = ref_low  * 0.001
+        eq_h  = sum(1 for h in prev_highs if abs(h - ref_high) < tol_h)
+        eq_l  = sum(1 for l in prev_lows  if abs(l - ref_low)  < tol_l)
+
+        if eq_h >= 2:
+            result["equal_highs"] = ref_high
+        if eq_l >= 2:
+            result["equal_lows"] = ref_low
+
+        # Inducement: minor swing broken briefly before major move
+        # Small sweep below minor low in uptrend = spring/inducement
+        minor_lows  = sorted(prev_lows)[:3]
+        minor_highs = sorted(prev_highs, reverse=True)[:3]
+
+        if minor_lows and min(recent_l) < minor_lows[-1] and closes[-1] > minor_lows[-1]:
+            result["inducement_long"] = True
+        if minor_highs and max(recent_h) > minor_highs[-1] and closes[-1] < minor_highs[-1]:
+            result["inducement_short"] = True
 
         return result
 
-    def _order_flow(self, opens: list, closes: list, volumes: list) -> dict:
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER 4 — ORDER FLOW (CVD)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _order_flow(self, opens, closes, volumes, lookback=20) -> dict:
         """
-        CVD (Cumulative Volume Delta) and absorption detection
-        Delta = estimated buy volume - sell volume per candle
-        """
-        result = {"cvd_trend": "neutral", "delta": 0, "absorption": None}
+        Cumulative Volume Delta — tracks REAL buying vs selling pressure
+        This is the fastest signal. Price lags. Volume delta leads.
 
-        if len(closes) < 20:
-            return result
-
-        # Estimate delta: bullish candles = buying, bearish = selling
-        deltas = []
-        for i in range(len(closes)):
-            body = closes[i] - opens[i]
-            vol = volumes[i]
-            if body > 0:
-                # Bullish — more buy volume
-                buy_vol = vol * 0.7
-                sell_vol = vol * 0.3
-            elif body < 0:
-                # Bearish — more sell volume
-                buy_vol = vol * 0.3
-                sell_vol = vol * 0.7
-            else:
-                buy_vol = sell_vol = vol * 0.5
-            deltas.append(buy_vol - sell_vol)
-
-        recent_deltas = deltas[-20:]
-        cumulative = sum(recent_deltas)
-        result["delta"] = cumulative
-
-        # CVD trend
-        first_half  = sum(recent_deltas[:10])
-        second_half = sum(recent_deltas[10:])
-        if second_half > first_half * 1.2:
-            result["cvd_trend"] = "bullish"
-        elif second_half < first_half * 0.8:
-            result["cvd_trend"] = "bearish"
-
-        # Absorption: high volume but small body = absorption
-        last_vol  = volumes[-1]
-        avg_vol   = sum(volumes[-20:]) / 20
-        last_body = abs(closes[-1] - opens[-1])
-        avg_range = sum(abs(closes[i] - opens[i]) for i in range(-20, -1)) / 20
-
-        if last_vol > avg_vol * 1.8 and last_body < avg_range * 0.4:
-            result["absorption"] = "buyers absorbing" if closes[-1] > opens[-1] else "sellers absorbing"
-
-        return result
-
-    def _footprint_analysis(self, opens: list, closes: list, volumes: list,
-                             highs: list, lows: list, lookback: int = 10) -> dict:
-        """
-        Approximated footprint chart analysis
-        Estimates buy/sell volume at each price level
+        Aggressive buying  = market orders hitting the ask = real buyers
+        Aggressive selling = market orders hitting the bid = real sellers
+        Absorption         = one side trying but price NOT moving = trap
+        CVD Divergence     = price and delta going opposite directions = reversal
         """
         result = {
-            "buying_pressure": 0.5,
-            "imbalance_long": False,
-            "imbalance_short": False
+            "aggressive_buying":   False,
+            "aggressive_selling":  False,
+            "absorption_long":     False,
+            "absorption_short":    False,
+            "cvd_divergence_long": False,
+            "cvd_divergence_short":False,
+            "delta": 0
         }
 
         if len(closes) < lookback:
             return result
 
-        total_buy  = 0
-        total_sell = 0
+        # Estimate per-candle delta: bullish body = more buy volume
+        deltas = []
+        for i in range(len(opens)):
+            body   = closes[i] - opens[i]
+            vol    = volumes[i]
+            rng    = abs(closes[i] - opens[i]) + 1e-10
+            # Proportion of volume that's buying vs selling
+            buy_pct  = 0.5 + (body / (2 * rng)) * 0.4   # 30-70% range
+            deltas.append(vol * buy_pct - vol * (1 - buy_pct))
 
-        for i in range(-lookback, 0):
-            vol  = volumes[i]
-            body = closes[i] - opens[i]
-            wick_up   = highs[i] - max(opens[i], closes[i])
-            wick_down = min(opens[i], closes[i]) - lows[i]
-            full_range = highs[i] - lows[i] if highs[i] != lows[i] else 1
+        recent     = deltas[-lookback:]
+        cumulative = sum(recent)
+        result["delta"] = cumulative
 
-            # Distribute volume: body + wicks
-            buy_ratio  = (max(body, 0) + wick_up)  / full_range
-            sell_ratio = (max(-body, 0) + wick_down) / full_range
+        # Aggressive buying: rising delta, rising price, increasing volume
+        avg_vol = sum(volumes[-lookback:]) / lookback
+        if (cumulative > 0 and
+            sum(recent[-5:]) > sum(recent[:5]) and
+            volumes[-1] > avg_vol * 1.2):
+            result["aggressive_buying"] = True
 
-            total_buy  += vol * buy_ratio
-            total_sell += vol * sell_ratio
+        # Aggressive selling
+        if (cumulative < 0 and
+            sum(recent[-5:]) < sum(recent[:5]) and
+            volumes[-1] > avg_vol * 1.2):
+            result["aggressive_selling"] = True
 
-        total = total_buy + total_sell
-        result["buying_pressure"] = total_buy / total if total > 0 else 0.5
+        # Absorption: high volume but price barely moved
+        price_move = abs(closes[-1] - closes[-6]) if len(closes) > 6 else 0
+        avg_move   = sum(abs(closes[i] - closes[i-1]) for i in range(-lookback, -1)) / lookback
+        high_vol   = volumes[-1] > avg_vol * 1.8
 
-        # Imbalance: 3+ consecutive same-direction candles with increasing volume
-        recent_bodies = [closes[i] - opens[i] for i in range(-5, 0)]
-        recent_vols   = volumes[-5:]
-
-        if all(b > 0 for b in recent_bodies) and recent_vols[-1] > recent_vols[-3]:
-            result["imbalance_long"] = True
-        elif all(b < 0 for b in recent_bodies) and recent_vols[-1] > recent_vols[-3]:
-            result["imbalance_short"] = True
-
-        return result
-
-    def _accumulation_distribution(self, opens: list, closes: list,
-                                    highs: list, lows: list, volumes: list,
-                                    period: int = 14) -> dict:
-        """
-        Wyckoff-inspired accumulation/distribution detection using MFI + VWAP deviation
-        """
-        result = {"phase": "neutral", "mfi": 50}
-
-        if len(closes) < period * 2:
-            return result
-
-        # Money Flow Index (MFI)
-        typical_prices = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(len(closes))]
-        money_flows    = [typical_prices[i] * volumes[i] for i in range(len(closes))]
-
-        pos_flow = 0
-        neg_flow = 0
-        for i in range(-period, -1):
-            if typical_prices[i] > typical_prices[i - 1]:
-                pos_flow += money_flows[i]
+        if high_vol and price_move < avg_move * 0.3:
+            if cumulative > 0:
+                result["absorption_short"] = True   # Buying absorbed = sellers winning
             else:
-                neg_flow += money_flows[i]
+                result["absorption_long"] = True    # Selling absorbed = buyers winning
 
-        if neg_flow == 0:
-            mfi = 100
-        else:
-            mfi = 100 - (100 / (1 + pos_flow / neg_flow))
+        # CVD Divergence: price vs delta going opposite ways
+        if len(closes) >= lookback:
+            price_up  = closes[-1] > closes[-lookback]
+            delta_up  = recent[-1] > recent[0] if recent else False
 
-        result["mfi"] = mfi
+            price_low_recent  = closes[-1] < closes[-lookback//2]
+            delta_high_recent = sum(recent[-lookback//2:]) > sum(recent[:lookback//2])
 
-        # VWAP deviation for premium/discount context
-        vwap = sum(money_flows[-period:]) / sum(volumes[-period:]) if sum(volumes[-period:]) > 0 else closes[-1]
-        price = closes[-1]
-        vwap_dev = (price - vwap) / vwap * 100
-
-        # Classify phase
-        if mfi < 30 and vwap_dev < -1:
-            result["phase"] = "accumulation"
-        elif mfi > 70 and vwap_dev > 1:
-            result["phase"] = "distribution"
-        elif mfi > 55 and vwap_dev > 0:
-            result["phase"] = "markup"
-        elif mfi < 45 and vwap_dev < 0:
-            result["phase"] = "markdown"
+            if price_low_recent and delta_high_recent:
+                result["cvd_divergence_long"] = True   # Price down, delta up = hidden buyers
+            elif not price_low_recent and not delta_high_recent:
+                result["cvd_divergence_short"] = True  # Price up, delta down = hidden sellers
 
         return result
 
-    def _execution_zones(self, opens: list, closes: list,
-                          highs: list, lows: list, lookback: int = 30) -> dict:
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER 5 — FOOTPRINT CHART
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _footprint(self, opens, closes, highs, lows, volumes, lookback=10) -> dict:
         """
-        Identify Order Blocks and Fair Value Gaps (FVG)
-        OB: Last bearish candle before a bullish impulse (bullish OB) and vice versa
-        FVG: Gap between candle[i-2] high and candle[i] low (unfilled gaps)
+        Simulated footprint chart analysis.
+        Footprint shows buy/sell volume at EACH price level.
+
+        Stacked bid imbalances   = institutions buying at multiple levels = strong long
+        Stacked ask imbalances   = institutions selling at multiple levels = strong short
+        Unfinished business      = price left a level with only one side = will return
+        Buying/selling exhaustion= delta peaks but price stalls = reversal
         """
-        zones = {
-            "bullish_ob":  [],
-            "bearish_ob":  [],
-            "bullish_fvg": [],
-            "bearish_fvg": []
+        result = {
+            "stacked_bid_imbalance":  False,
+            "stacked_ask_imbalance":  False,
+            "unfinished_business_low": False,
+            "unfinished_business_high":False,
+            "buying_exhaustion":  False,
+            "selling_exhaustion": False
         }
 
-        data_len = min(len(closes), lookback)
+        if len(closes) < lookback + 2:
+            return result
 
-        # Order Blocks
-        for i in range(2, data_len - 1):
-            idx = -(data_len - i)
+        # Classify each candle's footprint
+        bid_imbalance_count = 0
+        ask_imbalance_count = 0
+        deltas = []
 
-            # Bullish OB: bearish candle followed by strong bullish move
-            if (closes[idx] < opens[idx] and                          # bearish candle
-                closes[idx + 1] > opens[idx + 1] and                  # next is bullish
-                closes[idx + 1] > highs[idx]):                         # strong move up
+        for i in range(-lookback, 0):
+            body      = closes[i] - opens[i]
+            wick_up   = highs[i]  - max(opens[i], closes[i])
+            wick_down = min(opens[i], closes[i]) - lows[i]
+            full_rng  = highs[i]  - lows[i] if highs[i] != lows[i] else 1e-10
+            vol       = volumes[i]
+
+            # Bid imbalance: strong bullish body, small upper wick
+            if body > 0 and body/full_rng > 0.6 and wick_up < body * 0.3:
+                bid_imbalance_count += 1
+
+            # Ask imbalance: strong bearish body, small lower wick
+            if body < 0 and abs(body)/full_rng > 0.6 and wick_down < abs(body) * 0.3:
+                ask_imbalance_count += 1
+
+            buy_vol  = vol * (0.5 + min(body / (full_rng * 2), 0.4))
+            sell_vol = vol - buy_vol
+            deltas.append(buy_vol - sell_vol)
+
+        # Stacked = 3+ consecutive imbalances on same side
+        if bid_imbalance_count >= 3:
+            result["stacked_bid_imbalance"] = True
+        if ask_imbalance_count >= 3:
+            result["stacked_ask_imbalance"] = True
+
+        # Unfinished business: long lower wick (price returned to buy but didn't finish)
+        last_wick_down = min(opens[-1], closes[-1]) - lows[-1]
+        last_wick_up   = highs[-1] - max(opens[-1], closes[-1])
+        last_range     = highs[-1] - lows[-1] if highs[-1] != lows[-1] else 1e-10
+
+        if last_wick_down / last_range > 0.5:
+            result["unfinished_business_low"] = True
+        if last_wick_up / last_range > 0.5:
+            result["unfinished_business_high"] = True
+
+        # Exhaustion: delta peaked 3-4 candles ago, now declining while price stalls
+        if len(deltas) >= 6:
+            peak_idx = deltas.index(max(deltas[-6:]))
+            if peak_idx <= 3 and sum(deltas[-3:]) < sum(deltas[-6:-3]) * 0.5:
+                result["buying_exhaustion"] = True
+
+            trough_idx = deltas.index(min(deltas[-6:]))
+            if trough_idx <= 3 and sum(deltas[-3:]) > sum(deltas[-6:-3]) * 0.5:
+                result["selling_exhaustion"] = True
+
+        return result
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER 6 — ACCUMULATION / DISTRIBUTION (WYCKOFF)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _accumulation_distribution(self, opens, closes, highs, lows, volumes,
+                                    lookback=40) -> dict:
+        """
+        Wyckoff methodology — how institutions accumulate/distribute:
+
+        Accumulation → Spring → Markup
+        Distribution → Upthrust → Markdown
+
+        Spring:    Final shakeout below range support = highest probability long
+        Upthrust:  Final fake breakout above range resistance = highest probability short
+        """
+        result = {
+            "phase": "neutral",
+            "re_accumulation": False,
+            "re_distribution": False
+        }
+
+        if len(closes) < lookback:
+            return result
+
+        segment     = closes[-lookback:]
+        seg_highs   = highs[-lookback:]
+        seg_lows    = lows[-lookback:]
+        seg_vols    = volumes[-lookback:]
+        seg_opens   = opens[-lookback:]
+
+        rng_high    = max(seg_highs)
+        rng_low     = min(seg_lows)
+        rng         = rng_high - rng_low
+        price       = closes[-1]
+
+        if rng == 0:
+            return result
+
+        # Detect if we're in a trading range (price oscillating in a band)
+        avg_body    = sum(abs(segment[i] - seg_opens[i]) for i in range(len(segment))) / len(segment)
+        in_range    = (rng > 0) and (price > rng_low + rng * 0.1) and (price < rng_high - rng * 0.1)
+
+        # Volume profile: accumulation has higher volume at lows
+        lower_half_vol = sum(v for v, l in zip(seg_vols, seg_lows) if l < (rng_low + rng * 0.4))
+        upper_half_vol = sum(v for v, h in zip(seg_vols, seg_highs) if h > (rng_low + rng * 0.6))
+
+        # Spring: price dips BELOW range low then snaps back up with volume
+        recent_lows  = seg_lows[-5:]
+        recent_close = closes[-1]
+        if min(recent_lows) < rng_low and recent_close > rng_low:
+            if seg_vols[-1] > sum(seg_vols) / len(seg_vols) * 1.5:
+                result["phase"] = "spring"
+                return result
+
+        # Upthrust: price pops ABOVE range high then snaps back down
+        recent_highs = seg_highs[-5:]
+        if max(recent_highs) > rng_high and recent_close < rng_high:
+            if seg_vols[-1] > sum(seg_vols) / len(seg_vols) * 1.5:
+                result["phase"] = "upthrust"
+                return result
+
+        # Markup: price broke above range and is trending up
+        if price > rng_high and closes[-1] > closes[-5]:
+            result["phase"] = "markup"
+            # Re-accumulation: small pause in uptrend
+            if in_range:
+                result["re_accumulation"] = True
+            return result
+
+        # Markdown: price broke below range and is trending down
+        if price < rng_low and closes[-1] < closes[-5]:
+            result["phase"] = "markdown"
+            if in_range:
+                result["re_distribution"] = True
+            return result
+
+        # In range — determine if accumulation or distribution by volume profile
+        if in_range:
+            if lower_half_vol > upper_half_vol * 1.3:
+                result["phase"] = "accumulation"   # More volume at lows = buying
+            elif upper_half_vol > lower_half_vol * 1.3:
+                result["phase"] = "distribution"   # More volume at highs = selling
+
+        return result
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER 7 — EXECUTION ZONES
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _execution_zones(self, opens, closes, highs, lows, lookback=40) -> dict:
+        """
+        Identify WHERE to enter, not just what direction.
+
+        Order Block (OB):
+          Bullish OB = last bearish candle before a strong bullish impulse
+          Bearish OB = last bullish candle before a strong bearish impulse
+
+        Breaker Block:
+          Failed OB that price breaks through = flips to opposite zone
+          Highest probability zone in all of SMC
+
+        Fair Value Gap (FVG / Imbalance):
+          3-candle pattern where price moved so fast it left a gap
+          Price will return to fill it — almost guaranteed
+
+        Mitigation Block:
+          Previous OB that price returns to for one final touch before continuing
+        """
+        zones = {
+            "bullish_ob":       [],
+            "bearish_ob":       [],
+            "bullish_breaker":  [],
+            "bearish_breaker":  [],
+            "bullish_fvg":      [],
+            "bearish_fvg":      [],
+            "mitigation_blocks":[]
+        }
+
+        n = min(len(closes), lookback)
+
+        for i in range(2, n - 2):
+            idx = i - n   # negative index
+
+            c  = closes[idx];  o  = opens[idx]
+            c1 = closes[idx+1]; o1 = opens[idx+1]
+            h  = highs[idx];   l  = lows[idx]
+
+            bullish_candle = c > o
+            bearish_candle = c < o
+
+            # ── Order Blocks ──────────────────────────────────────────────────
+            # Bullish OB: bearish candle followed by strong up move
+            if (bearish_candle and c1 > o1 and          # next candle bullish
+                c1 > h):                                  # closes above OB high
                 zones["bullish_ob"].append({
-                    "high": max(opens[idx], closes[idx]),
-                    "low":  min(opens[idx], closes[idx])
+                    "high": max(o, c),
+                    "low":  min(o, c),
+                    "idx":  i
                 })
 
-            # Bearish OB: bullish candle followed by strong bearish move
-            if (closes[idx] > opens[idx] and
-                closes[idx + 1] < opens[idx + 1] and
-                closes[idx + 1] < lows[idx]):
+            # Bearish OB: bullish candle followed by strong down move
+            if (bullish_candle and c1 < o1 and
+                c1 < l):
                 zones["bearish_ob"].append({
-                    "high": max(opens[idx], closes[idx]),
-                    "low":  min(opens[idx], closes[idx])
+                    "high": max(o, c),
+                    "low":  min(o, c),
+                    "idx":  i
                 })
 
-        # Fair Value Gaps (3-candle pattern)
-        for i in range(2, data_len):
-            idx = -(data_len - i)
-            try:
-                prev2_high = highs[idx - 2]
-                curr_low   = lows[idx]
-                prev2_low  = lows[idx - 2]
-                curr_high  = highs[idx]
+            # ── Fair Value Gaps ───────────────────────────────────────────────
+            # Bullish FVG: candle[i-2].high < candle[i].low
+            if i >= 2:
+                h_prev2 = highs[idx-2] if idx-2 >= -n else None
+                l_curr  = lows[idx]
 
-                # Bullish FVG: gap between candle[-2] high and candle[0] low
-                if curr_low > prev2_high:
+                if h_prev2 and l_curr > h_prev2:
                     zones["bullish_fvg"].append({
-                        "high": curr_low,
-                        "low":  prev2_high
+                        "high": l_curr,
+                        "low":  h_prev2
                     })
 
-                # Bearish FVG: gap between candle[-2] low and candle[0] high
-                if curr_high < prev2_low:
+                l_prev2 = lows[idx-2] if idx-2 >= -n else None
+                h_curr  = highs[idx]
+
+                if l_prev2 and h_curr < l_prev2:
                     zones["bearish_fvg"].append({
-                        "high": prev2_low,
-                        "low":  curr_high
+                        "high": l_prev2,
+                        "low":  h_curr
                     })
-            except IndexError:
-                continue
 
-        # Keep only the 3 most recent zones
-        for key in zones:
+        # ── Breaker Blocks ────────────────────────────────────────────────────
+        # A bullish OB that price broke back below = now bearish breaker
+        price = closes[-1]
+        for ob in zones["bullish_ob"][:]:
+            if price < ob["low"]:
+                zones["bearish_breaker"].append(ob)
+
+        # A bearish OB that price broke back above = now bullish breaker
+        for ob in zones["bearish_ob"][:]:
+            if price > ob["high"]:
+                zones["bullish_breaker"].append(ob)
+
+        # ── Mitigation Blocks ─────────────────────────────────────────────────
+        # Unmitigated OBs that price is currently returning to
+        for ob in zones["bullish_ob"][-5:]:
+            if ob["low"] <= price <= ob["high"] * 1.005:
+                zones["mitigation_blocks"].append({**ob, "type": "long"})
+        for ob in zones["bearish_ob"][-5:]:
+            if ob["low"] * 0.995 <= price <= ob["high"]:
+                zones["mitigation_blocks"].append({**ob, "type": "short"})
+
+        # Keep only recent zones (last 3 of each)
+        for key in ["bullish_ob", "bearish_ob", "bullish_fvg", "bearish_fvg"]:
             zones[key] = zones[key][-3:]
 
         return zones
 
-    def _premium_discount(self, highs: list, lows: list, price: float,
-                           lookback: int = 50) -> dict:
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER 8 — ORDER BOOK
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _orderbook_analysis(self, orderbook: dict, price: float, atr: float) -> dict:
         """
-        ICT Premium/Discount model
-        Bottom 25% of range = discount (look for longs)
-        Top 25% = premium (look for shorts)
-        """
-        high = max(highs[-lookback:])
-        low  = min(lows[-lookback:])
-        rng  = high - low
-
-        if rng == 0:
-            return {"zone": "equilibrium", "percent": 50}
-
-        percent = (price - low) / rng * 100
-
-        if percent <= 25:
-            zone = "discount"
-        elif percent >= 75:
-            zone = "premium"
-        else:
-            zone = "equilibrium"
-
-        return {"zone": zone, "percent": percent}
-
-    def _orderbook_analysis(self, orderbook: dict, price: float,
-                             depth_levels: int = 20) -> dict:
-        """
-        Analyze order book for bid/ask imbalance and large walls
+        Real-time order book analysis:
+        - Bid/ask dominance (volume imbalance)
+        - Iceberg orders (hidden large orders being refreshed)
+        - Thin walls (easy for price to break through)
+        - Spoofing detection (large orders that disappear)
         """
         result = {
-            "imbalance": "neutral",
-            "ratio": 1.0,
-            "large_bid_wall": None,
-            "large_ask_wall": None
+            "bid_dominance":      False,
+            "ask_dominance":      False,
+            "ratio":              1.0,
+            "iceberg_bid":        False,
+            "iceberg_ask":        False,
+            "iceberg_bid_price":  0,
+            "iceberg_ask_price":  0,
+            "thin_ask_wall":      False,
+            "thin_bid_wall":      False
         }
 
         try:
-            bids = orderbook.get("bids", [])[:depth_levels]
-            asks = orderbook.get("asks", [])[:depth_levels]
+            bids = orderbook.get("bids", [])[:30]
+            asks = orderbook.get("asks", [])[:30]
 
             if not bids or not asks:
                 return result
 
-            bid_vol = sum(float(b[1]) for b in bids)
-            ask_vol = sum(float(a[1]) for a in asks)
+            bid_prices = [float(b[0]) for b in bids]
+            ask_prices = [float(a[0]) for a in asks]
+            bid_vols   = [float(b[1]) for b in bids]
+            ask_vols   = [float(a[1]) for a in asks]
 
-            total = bid_vol + ask_vol
-            if total == 0:
+            total_bid = sum(bid_vols)
+            total_ask = sum(ask_vols)
+
+            if total_bid + total_ask == 0:
                 return result
 
-            ratio = bid_vol / ask_vol if ask_vol > 0 else 1.0
+            ratio = total_bid / total_ask if total_ask > 0 else 1.0
             result["ratio"] = ratio
 
-            if ratio > 1.5:
-                result["imbalance"] = "bid_heavy"
-            elif ratio < 0.67:
-                result["imbalance"] = "ask_heavy"
+            if ratio > 1.6:
+                result["bid_dominance"] = True
+            elif ratio < 0.625:
+                result["ask_dominance"] = True
 
-            # Detect large walls (single level > 15% of total depth)
-            avg_bid = bid_vol / len(bids) if bids else 0
-            avg_ask = ask_vol / len(asks) if asks else 0
+            # Iceberg detection: single level with volume >> average
+            avg_bid_vol = total_bid / len(bid_vols) if bid_vols else 0
+            avg_ask_vol = total_ask / len(ask_vols) if ask_vols else 0
 
-            for b in bids:
-                if float(b[1]) > avg_bid * 4:
-                    result["large_bid_wall"] = float(b[0])
+            for i, (p, v) in enumerate(zip(bid_prices, bid_vols)):
+                if v > avg_bid_vol * 5 and i < 10:   # Large order near top of book
+                    result["iceberg_bid"]       = True
+                    result["iceberg_bid_price"] = p
                     break
 
-            for a in asks:
-                if float(a[1]) > avg_ask * 4:
-                    result["large_ask_wall"] = float(a[0])
+            for i, (p, v) in enumerate(zip(ask_prices, ask_vols)):
+                if v > avg_ask_vol * 5 and i < 10:
+                    result["iceberg_ask"]       = True
+                    result["iceberg_ask_price"] = p
                     break
+
+            # Thin wall: total volume in 1 ATR range above/below is small
+            thin_threshold = total_ask * 0.1
+            ask_near = sum(v for p, v in zip(ask_prices, ask_vols) if p < price + atr)
+            if ask_near < thin_threshold:
+                result["thin_ask_wall"] = True
+
+            thin_threshold_b = total_bid * 0.1
+            bid_near = sum(v for p, v in zip(bid_prices, bid_vols) if p > price - atr)
+            if bid_near < thin_threshold_b:
+                result["thin_bid_wall"] = True
 
         except Exception as e:
-            logger.warning(f"Order book analysis error: {e}")
+            logger.warning(f"Order book error: {e}")
 
         return result
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════════
+    # HELPERS
+    # ═══════════════════════════════════════════════════════════════════════════
 
-    def _swing_highs(self, highs: list, window: int = 5) -> list:
+    def _premium_discount(self, highs, lows, price, lookback=50) -> dict:
+        high = max(highs[-lookback:])
+        low  = min(lows[-lookback:])
+        rng  = high - low
+        if rng == 0:
+            return {"zone": "equilibrium", "pct": 50}
+        pct  = (price - low) / rng * 100
+        zone = "discount" if pct <= 30 else "premium" if pct >= 70 else "equilibrium"
+        return {"zone": zone, "pct": pct}
+
+    def _find_swing_highs(self, highs, window=5) -> list:
         swings = []
         for i in range(window, len(highs) - window):
-            if highs[i] == max(highs[i - window:i + window + 1]):
+            if highs[i] == max(highs[i-window:i+window+1]):
                 swings.append(highs[i])
         return swings or [max(highs)]
 
-    def _swing_lows(self, lows: list, window: int = 5) -> list:
+    def _find_swing_lows(self, lows, window=5) -> list:
         swings = []
         for i in range(window, len(lows) - window):
-            if lows[i] == min(lows[i - window:i + window + 1]):
+            if lows[i] == min(lows[i-window:i+window+1]):
                 swings.append(lows[i])
         return swings or [min(lows)]
 
 
-# Alias so engine.py import stays clean
+# Alias
 AggressiveScalper = InstitutionalStrategy
