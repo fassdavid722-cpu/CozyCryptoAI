@@ -1,6 +1,6 @@
 """
 CozyCryptoAI - Telegram Interface
-Chat with the AI, get trade notifications, control the bot
+Universal Scanner Edition — tracks ALL Bitget futures pairs
 """
 
 import logging
@@ -28,6 +28,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("positions", self.cmd_positions))
         self.app.add_handler(CommandHandler("pnl", self.cmd_pnl))
         self.app.add_handler(CommandHandler("balance", self.cmd_balance))
+        self.app.add_handler(CommandHandler("scan", self.cmd_scan))
         self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
@@ -60,19 +61,21 @@ class TelegramBot:
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
-            "⚡ *CozyCryptoAI — Futures Edition*\n\n"
-            f"I trade USDT-M perpetual contracts on Bitget with *{LEVERAGE}x leverage* ({MARGIN_MODE} margin).\n"
-            "I go *Long AND Short* — I make money in both directions.\n\n"
-            "Just talk to me naturally. Ask why I traded something, what I'm watching, "
-            "or tell me to pause. I'll notify you on every move.\n\n"
+            "⚡ *CozyCryptoAI — Universal Futures Scanner*\n\n"
+            f"I scan *ALL* USDT-M futures on Bitget — not just BTC/ETH.\n"
+            f"Any token with enough volume and momentum gets on my radar.\n"
+            f"Trading with *{LEVERAGE}x leverage* ({MARGIN_MODE} margin).\n\n"
+            "I go *Long AND Short* — I profit in both directions.\n\n"
             "*Commands:*\n"
-            "/status — Trading status + leverage + balance\n"
+            "/status — Status + balance + last scan results\n"
+            "/scan — Show top opportunities right now\n"
             "/positions — Open futures positions\n"
             "/balance — Futures account balance\n"
-            "/pnl — Total realized PnL\n"
+            "/pnl — Session PnL\n"
             "/pause — Pause trading\n"
             "/resume — Resume trading\n"
-            "/closeall — Emergency close all positions"
+            "/closeall — Emergency close all positions\n\n"
+            "Or just talk to me naturally 👇"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -81,31 +84,58 @@ class TelegramBot:
             return
         status = await self.engine.get_status()
         state = "⏸ PAUSED" if status["paused"] else "🟢 ACTIVE"
+        opps = "\n".join([f"  • {o}" for o in status["last_opportunities"]]) or "  Scanning..."
+
         msg = (
             f"*Status:* {state}\n"
             f"*Leverage:* {status['leverage']}x {status['margin_mode']} margin\n"
             f"*Balance:* ${status['balance_usdt']['available']:.2f} USDT available\n"
             f"*Equity:* ${status['balance_usdt']['total']:.2f} USDT\n"
             f"*Open Positions:* {len(status['open_positions'])}/3\n"
-            f"*Total PnL:* {status['total_pnl']:+.4f} USDT\n"
-            f"*Watching:* {', '.join(status['watching'])}"
+            f"*Session PnL:* {status['total_pnl']:+.4f} USDT\n"
+            f"*Total Scans:* {status['total_scans']}\n"
+            f"*Last Scan:* {status['pairs_in_last_scan']} pairs qualified\n\n"
+            f"*Top Movers:*\n{opps}"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def cmd_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.engine:
+            return
+        await update.message.reply_text("🔍 Scanning all futures pairs...")
+        try:
+            opps = await self.engine.scanner.scan_market()
+            if not opps:
+                await update.message.reply_text("Nothing qualifying right now. Markets are quiet.")
+                return
+
+            lines = [f"*Top {min(10, len(opps))} Opportunities Right Now:*\n"]
+            for o in opps[:10]:
+                direction = "🟢 LONG" if o["direction"] == "long" else "🔴 SHORT"
+                lines.append(
+                    f"{direction} *{o['symbol']}*\n"
+                    f"  Price: ${o['price']:.6g} | Change: {o['change_pct']:+.2f}%\n"
+                    f"  Vol 24h: ${o['volume_24h']:,.0f}\n"
+                    f"  Score: {o['score']:.1f}/100\n"
+                )
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"Scan error: {e}")
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.engine:
             return
         positions = self.engine.open_positions
         if not positions:
-            await update.message.reply_text("No open futures positions.")
+            await update.message.reply_text("No open futures positions right now.")
             return
         lines = ["*Open Futures Positions:*\n"]
         for symbol, pos in positions.items():
             direction = "🟢 LONG" if pos["hold_side"] == "long" else "🔴 SHORT"
             lines.append(
                 f"{direction} *{symbol}* ({pos['leverage']}x)\n"
-                f"  Entry: ${pos['entry_price']:.4f}\n"
-                f"  SL: ${pos['stop_loss']:.4f} | TP: ${pos['take_profit']:.4f}\n"
+                f"  Entry: ${pos['entry_price']:.6g}\n"
+                f"  SL: ${pos['stop_loss']:.6g} | TP: ${pos['take_profit']:.6g}\n"
                 f"  Size: {pos['contracts']} contracts\n"
                 f"  Reason: {pos['reason']}\n"
             )
@@ -153,12 +183,12 @@ class TelegramBot:
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self.engine:
             self.engine.pause()
-        await update.message.reply_text("⏸ Trading paused. Holding existing positions but no new entries.")
+        await update.message.reply_text("⏸ Trading paused. Watching the market but not entering.")
 
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self.engine:
             self.engine.resume()
-        await update.message.reply_text("🟢 Back in action. Scanning futures markets now.")
+        await update.message.reply_text("🟢 Back scanning. Any setup that qualifies, I'm in.")
 
     async def run(self):
         logger.info("Telegram bot starting...")
