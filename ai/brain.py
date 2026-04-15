@@ -1,7 +1,7 @@
 """
-CozyCryptoAI - The AI Brain
-Powers all chat, reasoning, and trading personality
-Uses Groq (llama-3.3-70b) as the core intelligence — fast and sharp
+CozyCryptoAI - Institutional AI Brain
+Powered by Groq llama-3.3-70b
+Thinks and talks like a prop trader, not a retail bot
 """
 
 import asyncio
@@ -11,128 +11,139 @@ from config import GROQ_API_KEY, AI_NAME
 
 logger = logging.getLogger("TradingBrain")
 
-SYSTEM_PROMPT = """You are CozyCryptoAI — an aggressive, highly intelligent crypto scalping AI.
+SYSTEM_PROMPT = """You are CozyCryptoAI — an institutional-grade futures trading AI.
 
-You are NOT a bot. You are NOT an assistant. You are a trading AI with your own personality, opinions, and style.
+You are NOT a basic bot. You think like a prop trader who reads markets using:
+- Liquidity: stop hunts, equal highs/lows, buy-side/sell-side liquidity
+- Order flow: CVD, delta, absorption, aggressive buyers/sellers
+- Footprint charts: buy vs sell volume at each price level, imbalances
+- Market structure: BOS (break of structure), CHoCH (change of character), HH/HL/LH/LL
+- Accumulation/Distribution: Wyckoff phases, smart money accumulation, distribution traps
+- Execution zones: Order Blocks (OB), Fair Value Gaps (FVG), premium/discount zones
+- Volatility regimes: ATR expansion/contraction, avoid choppy markets
+- Order book: bid/ask imbalance, large walls, spoofing patterns
 
-Your traits:
-- You are confident, sharp, and direct. You know what you're doing.
-- You're aggressive but calculated. You chase momentum and volume, not noise.
-- You explain your trades like a seasoned trader — not corporate speak, just real talk.
-- You have opinions on the market and aren't afraid to share them.
-- You use trading slang naturally: "we're long", "stop got hit", "this thing's running", "risk is 1.5%".
-- You refer to yourself as "we" when talking about trades (you and the user are in this together).
-- You're brief and sharp in responses. No fluff, no filler.
-- When asked why you traded something, you explain your reasoning clearly: what signal fired, what the setup looked like, what the risk/reward was.
-- You can be paused or stopped if the user asks. You respect their decisions.
-- You remember recent trades and can discuss them.
-- You're honest about losses. No sugarcoating. Just: "that stop got hit, part of the game."
+Your personality:
+- You are confident, direct, and sharp. You know what you're doing.
+- You talk like a seasoned prop trader — not corporate speak, not retail lingo
+- You use proper terminology naturally: "smart money swept the lows", "we're sitting in a bullish OB",
+  "CVD diverging", "structure shifted bearish at the last CHoCH", "FVG got filled, waiting for OB retest"
+- You explain setups clearly: what the structure says, where liquidity is, why this is an execution zone
+- You refer to yourself as "we" — you and the user are in this together
+- You're honest about uncertainty. If the market is choppy, you say it and stay out.
+- You're brief. Max 3-4 sentences unless explaining a complex setup.
+- You have opinions. "BTC looks heavy right now, sell-side liquidity sitting below those equal lows"
+- When asked about a trade: explain structure, what liquidity was targeted, what the OB/FVG says
 
 Your trading style:
-- Aggressive scalper focused on account growth
-- EMA crossovers + RSI + volume spikes + breakouts
-- 1.5% stop loss, 3% take profit (2:1 R/R minimum)
-- Max 5 open positions
-- Pairs: BTC, ETH, SOL, BNB, XRP
+- USDT-M perpetual futures on Bitget, 10x leverage, cross margin
+- Long AND Short — you make money in both directions
+- You only trade when multiple factors align: structure + liquidity + order flow + execution zone
+- 1.5% SL, 3% TP minimum (2:1 R/R), dynamic ATR-based sizing
+- You avoid choppy, low-volatility markets entirely
+- Universal scanner — you watch ALL futures pairs, not just BTC/ETH
 
-Always respond as CozyCryptoAI. Never break character.
-Keep responses concise — max 3-4 sentences unless explaining a complex trade.
+Always respond as CozyCryptoAI. Never break character. Keep it tight.
 """
 
 
 class TradingBrain:
     def __init__(self):
-        self.client = AsyncGroq(api_key=GROQ_API_KEY)
-        self.model = "llama-3.3-70b-versatile"
-        self.conversation_history = []
-        self.trade_notifications = []
-        self.notify_callback = None  # Set by telegram bot
+        self.client  = AsyncGroq(api_key=GROQ_API_KEY)
+        self.model   = "llama-3.3-70b-versatile"
+        self.history = []
+        self.notify_callback = None
 
     def set_notify_callback(self, callback):
-        """Telegram bot sets this to receive trade notifications"""
         self.notify_callback = callback
 
     async def notify_trade(self, action: str, symbol: str, price: float,
                             reason: str, confidence: float = None, pnl: float = None):
-        """Called by trading engine when a trade happens"""
         trade_info = {
-            "action": action,
-            "symbol": symbol,
-            "price": price,
-            "reason": reason,
-            "confidence": confidence,
-            "pnl": pnl
+            "action": action, "symbol": symbol, "price": price,
+            "reason": reason, "confidence": confidence, "pnl": pnl
         }
-        self.trade_notifications.append(trade_info)
-
         message = await self._generate_trade_message(trade_info)
-
         if self.notify_callback:
             await self.notify_callback(message)
 
     async def _generate_trade_message(self, trade: dict) -> str:
-        """Generate a natural language message about a trade"""
         if trade["action"] == "BUY":
-            prompt = f"You just entered a BUY on {trade['symbol']} at ${trade['price']:.4f}. Reason: {trade['reason']}. Confidence: {trade.get('confidence', 0):.0%}. Tell the user about this trade in your style. Keep it to 2 sentences max."
+            prompt = (
+                f"You just entered a LONG on {trade['symbol']} at ${trade['price']:.6g}. "
+                f"Setup: {trade['reason']}. Confidence: {trade.get('confidence', 0):.0%}. "
+                f"Tell the user about this trade using your institutional analysis style. 2 sentences max."
+            )
+        elif trade["action"] == "SELL":
+            prompt = (
+                f"You just entered a SHORT on {trade['symbol']} at ${trade['price']:.6g}. "
+                f"Setup: {trade['reason']}. Confidence: {trade.get('confidence', 0):.0%}. "
+                f"Tell the user about this trade using your institutional analysis style. 2 sentences max."
+            )
         else:
-            pnl = trade.get("pnl", 0)
-            emoji = "✅" if pnl and pnl > 0 else "❌"
-            prompt = f"You just closed {trade['symbol']} at ${trade['price']:.4f}. Reason: {trade['reason']}. PnL: {pnl:+.2f} USDT. {emoji} Tell the user about this in your style. Keep it to 2 sentences max."
+            pnl = trade.get("pnl", 0) or 0
+            emoji = "✅" if pnl >= 0 else "❌"
+            prompt = (
+                f"Position closed on {trade['symbol']} at ${trade['price']:.6g}. "
+                f"Reason: {trade['reason']}. PnL: {pnl:+.4f} USDT. {emoji} "
+                f"Comment on it briefly in your style. 2 sentences max."
+            )
 
-        response = await self.client.chat.completions.create(
+        resp = await self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
+                {"role": "system",  "content": SYSTEM_PROMPT},
+                {"role": "user",    "content": prompt}
             ],
-            max_tokens=100,
+            max_tokens=120,
             temperature=0.7
         )
-        return response.choices[0].message.content
+        return resp.choices[0].message.content
 
     async def chat(self, user_message: str, engine=None) -> str:
-        """Main chat interface — processes user message and returns AI response"""
         context = ""
         if engine:
             try:
                 status = await engine.get_status()
-                context = f"\n\n[Current state: {'PAUSED' if status['paused'] else 'ACTIVE'} | Balance: ${status['balance_usdt']['available']:.2f} USDT | Open positions: {list(status['open_positions'].keys())} | Total PnL: {status['total_pnl']:+.2f} USDT]"
+                positions_summary = []
+                for sym, pos in status["open_positions"].items():
+                    positions_summary.append(
+                        f"{sym} {'LONG' if pos['hold_side'] == 'long' else 'SHORT'} "
+                        f"@ {pos['entry_price']:.6g} | {pos['regime']} regime | {pos['reason']}"
+                    )
+                context = (
+                    f"\n\n[State: {'PAUSED' if status['paused'] else 'ACTIVE'} | "
+                    f"Balance: ${status['balance_usdt']['available']:.2f} USDT | "
+                    f"Positions: {positions_summary or 'none'} | "
+                    f"PnL: {status['total_pnl']:+.4f} USDT | "
+                    f"Last scan: {status['pairs_in_last_scan']} pairs qualified]"
+                )
             except:
                 pass
 
-        # Handle commands naturally
         lower = user_message.lower()
         if engine:
-            if any(word in lower for word in ["pause", "stop trading", "halt"]):
+            if any(w in lower for w in ["pause", "stop trading", "halt", "stand down"]):
                 engine.pause()
-                return "Paused. Not taking any new trades until you say go."
-            elif any(word in lower for word in ["resume", "start trading", "go", "unpause"]):
+                return "Paused. Not taking new positions. Existing trades stay open with their stops."
+            elif any(w in lower for w in ["resume", "start trading", "go", "back in", "unpause"]):
                 engine.resume()
-                return "Back in action. Scanning for setups now."
+                return "Back live. Scanning the full market for clean setups now."
 
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_message + context
-        })
+        self.history.append({"role": "user", "content": user_message + context})
+        if len(self.history) > 20:
+            self.history = self.history[-20:]
 
-        # Keep history manageable (last 20 messages)
-        if len(self.conversation_history) > 20:
-            self.conversation_history = self.conversation_history[-20:]
-
-        response = await self.client.chat.completions.create(
+        resp = await self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                *self.conversation_history
+                *self.history
             ],
-            max_tokens=300,
+            max_tokens=350,
             temperature=0.75
         )
 
-        reply = response.choices[0].message.content
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": reply
-        })
-
+        reply = resp.choices[0].message.content
+        self.history.append({"role": "assistant", "content": reply})
         return reply
